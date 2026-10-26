@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>StrangerChat – Meet someone new</title>
+<style>
+:root{--bg:#f6f8fb;--card:#fff;--tx:#14213d;--mut:#6b7280;--pri:#4f46e5;--red:#ef4444;--bd:#e5e7eb}
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--tx)}
+header{background:var(--card);border-bottom:1px solid var(--bd);padding:14px 20px;font-weight:800;font-size:20px;color:var(--pri)}
+main{max-width:1000px;margin:0 auto;padding:16px}
+.videos{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.panel{position:relative;background:#0f172a;border-radius:16px;overflow:hidden;aspect-ratio:4/3}
+video{width:100%;height:100%;object-fit:cover;display:block}
+#me{transform:scaleX(-1)}
+.tag{position:absolute;left:10px;top:10px;background:rgba(255,255,255,.92);padding:3px 10px;border-radius:99px;font-size:12px;font-weight:600}
+#status{margin:14px 0;text-align:center;font-weight:600;color:var(--mut);min-height:24px}
+.bar{display:flex;flex-wrap:wrap;gap:8px;justify-content:center}
+button{border:1px solid var(--bd);background:var(--card);color:var(--tx);padding:11px 18px;border-radius:12px;font-size:15px;font-weight:600;cursor:pointer}
+button.p{background:var(--pri);color:#fff;border-color:var(--pri)}
+button.d{color:var(--red)}
+button.off{background:#fee2e2;color:var(--red)}
+button:disabled{opacity:.45;cursor:not-allowed}
+.rules{background:var(--card);border:1px solid var(--bd);border-radius:16px;padding:16px 20px;margin-top:18px;font-size:14px;color:var(--mut)}
+.rules h3{margin:0 0 6px;color:var(--tx);font-size:15px}
+.rules ul{margin:6px 0 12px;padding-left:20px}
+label{display:flex;gap:8px;align-items:center;color:var(--tx);font-weight:600;cursor:pointer}
+@media(max-width:700px){.videos{grid-template-columns:1fr}.panel{aspect-ratio:16/10}button{flex:1 1 30%;padding:11px 8px}}
+</style>
+</head>
+<body>
+<header>● StrangerChat</header>
+<main>
+  <div class="videos">
+    <div class="panel"><video id="stranger" autoplay playsinline></video><span class="tag">Stranger</span></div>
+    <div class="panel"><video id="me" autoplay playsinline muted></video><span class="tag">You</span></div>
+  </div>
+  <div id="status">Accept the guidelines below, then click Start</div>
+  <div class="bar">
+    <button class="p" id="start" disabled>Start</button>
+    <button id="next" disabled>Next</button>
+    <button class="d" id="stop" disabled>Stop</button>
+    <button id="mic" disabled>Mute</button>
+    <button id="cam" disabled>Camera off</button>
+    <button class="d" id="report" disabled>Report</button>
+  </div>
+  <section class="rules">
+    <h3>Safety guidelines</h3>
+    <ul>
+      <li>You must be 18 or older to use this site.</li>
+      <li>Never share personal details: full name, address, phone, passwords or money.</li>
+      <li>No nudity, harassment, hate, threats or illegal content.</li>
+      <li>Calls are peer-to-peer and are not recorded by this site. The other person could still record, so be careful.</li>
+      <li>Use Report if someone breaks the rules, and Next or Stop to leave at any time.</li>
+    </ul>
+    <label><input type="checkbox" id="agree"> I am 18+ and agree to these guidelines</label>
+  </section>
+</main>
+
+<script>
+const ICE = { iceServers: [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }] };
+// Optional TURN (helps on strict networks):
+// ICE.iceServers.push({ urls: "turn:HOST:3478", username: "USER", credential: "PASS" });
+
+const $ = id => document.getElementById(id);
+let ws, pc, local, active = false, matched = false, queue = [];
+const say = t => $("status").textContent = t;
+const send = o => { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); };
+
+function ui() {
+  $("start").disabled = active || !$("agree").checked;
+  $("stop").disabled = $("next").disabled = $("mic").disabled = $("cam").disabled = !active;
+  $("report").disabled = !(active && matched);
+}
+
+function closePc() {
+  if (pc) { pc.ontrack = pc.onicecandidate = pc.onconnectionstatechange = null; pc.close(); pc = null; }
+  $("stranger").srcObject = null; queue = []; matched = false;
+}
+
+function makePc() {
+  pc = new RTCPeerConnection(ICE);
+  local.getTracks().forEach(t => pc.addTrack(t, local));
+  pc.ontrack = e => { $("stranger").srcObject = e.streams[0]; };
+  pc.onicecandidate = e => { if (e.candidate) send({ t: "signal", candidate: e.candidate }); };
+  pc.onconnectionstatechange = () => {
+    const s = pc && pc.connectionState;
+    if (s === "connected") say("Connected – say hi!");
+    else if (s === "failed") { say("Connection failed. Finding someone else…"); next(); }
+  };
+}
+
+function connect() {
+  const w = ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/chat/");
+  w.onopen = () => { if (active) { closePc(); send({ t: "find" }); say("Searching for a stranger…"); } };
+  w.onmessage = e => { let m; try { m = JSON.parse(e.data); } catch { return; } handle(m); };
+  w.onclose = () => {
+    if (w !== ws) return;
+    ws = null; closePc();
+    if (active) { say("Connection lost. Reconnecting…"); setTimeout(() => { if (active && !ws) connect(); }, 2000); }
+    ui();
+  };
+}
+
+async function handle(m) {
+  if (m.t === "error") return stop(m.msg || "Error");
+  if (m.t === "waiting") return say("Searching for a stranger…");
+  if (m.t === "partner-left") { closePc(); say("Stranger left. Searching again…"); send({ t: "find" }); return ui(); }
+
+  if (m.t === "matched") {
+    closePc(); makePc(); matched = true; say("Stranger found. Connecting…"); ui();
+    if (!m.initiator) return;
+    const p = pc;
+    try {
+      const o = await p.createOffer(); await p.setLocalDescription(o);
+      if (p === pc) send({ t: "signal", sdp: p.localDescription });
+    } catch (e) { console.warn(e); }
+    return;
+  }
+
+  if (m.t === "signal" && pc) {
+    const p = pc;
+    try {
+      if (m.sdp) {
+        await p.setRemoteDescription(m.sdp);
+        for (const c of queue) await p.addIceCandidate(c);
+        queue = [];
+        if (m.sdp.type === "offer") {
+          const a = await p.createAnswer(); await p.setLocalDescription(a);
+          if (p === pc) send({ t: "signal", sdp: p.localDescription });
+        }
+      } else if (m.candidate) {
+        p.remoteDescription ? await p.addIceCandidate(m.candidate) : queue.push(m.candidate);
+      }
+    } catch (e) { console.warn(e); }
+  }
+}
+
+function next() {
+  if (!active) return;
+  closePc(); say("Searching for a stranger…"); send({ t: "find" }); ui();
+}
+
+function stop(msg) {
+  active = false; closePc();
+  if (ws) { const w = ws; ws = null; w.close(); }
+  if (local) { local.getTracks().forEach(t => t.stop()); local = null; }
+  $("me").srcObject = null;
+  $("mic").textContent = "Mute"; $("cam").textContent = "Camera off";
+  $("mic").classList.remove("off"); $("cam").classList.remove("off");
+  say(msg); ui();
+}
+
+$("start").onclick = async () => {
+  if (!navigator.mediaDevices || !window.RTCPeerConnection) return say("Video calling needs a modern browser over HTTPS.");
+  try {
+    local = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+  } catch (e) {
+    return say(e.name === "NotAllowedError" ? "Camera/microphone permission denied. Allow access and try again." :
+      e.name === "NotFoundError" ? "No camera or microphone found." : "Could not access camera/microphone.");
+  }
+  $("me").srcObject = local; active = true; say("Connecting to server…"); connect(); ui();
+};
+$("next").onclick = next;
+$("stop").onclick = () => stop("Stopped. Click Start to meet someone new.");
+$("report").onclick = () => { send({ t: "report" }); next(); say("Reported. Thanks! Finding someone else…"); };
+$("agree").onchange = ui;
+
+const toggle = (btn, kind, on, off) => btn.onclick = () => {
+  const t = local && local[kind]()[0]; if (!t) return;
+  t.enabled = !t.enabled; btn.textContent = t.enabled ? on : off; btn.classList.toggle("off", !t.enabled);
+};
+toggle($("mic"), "getAudioTracks", "Mute", "Unmute");
+toggle($("cam"), "getVideoTracks", "Camera off", "Camera on");
+ui();
+</script>
+</body>
+</html>
